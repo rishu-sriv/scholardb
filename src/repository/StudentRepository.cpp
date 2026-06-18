@@ -1,5 +1,6 @@
 #include "StudentRepository.h"
 #include "../common/CSVHandler.h"
+#include "../common/Timer.h"
 
 #include <algorithm>
 #include <cctype>
@@ -88,6 +89,7 @@ std::vector<Student> StudentRepository::findByName(const std::string& name) cons
 // ── sort (shared_lock, returns copy — canonical vector never touched) ──────
 
 std::vector<Student> StudentRepository::sortBy(SortField field) const {
+    Timer t("sort");                            // ② timed: sort operation
     std::shared_lock lock(rw_mutex);
     auto copy = students;                       // copy while holding shared_lock
     // lock released after this scope so the sort happens on a local copy,
