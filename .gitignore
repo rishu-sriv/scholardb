@@ -1,0 +1,11 @@
+build/
+output/
+*.o
+*.obj
+*.exe
+*.out
+.DS_Storebuild/
+output/
+.DS_Store
+.claude/
+CLAUDE.md
