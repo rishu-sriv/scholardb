@@ -1,11 +1,18 @@
 #include "WebSocketServer.h"
 #include "../common/Protocol.h"
 #include "../common/StudentValidator.h"
+#include "../common/CSVHandler.h"
 #include <iostream>
 
-WebSocketServer::WebSocketServer(int port)
-    : server_(port), port_(port)
+// ── Constructor: seed repo, register callback ─────────────────────────────
+
+WebSocketServer::WebSocketServer(int port, const std::string& csvPath)
+    : server_(port), port_(port), csvPath_(csvPath)
 {
+    repo_.loadFromCSV(csvPath_);
+    std::cout << "[server] loaded " << repo_.getAll().size()
+              << " student(s) from " << csvPath_ << "\n";
+
     server_.setOnClientMessageCallback(
         [this](std::shared_ptr<ix::ConnectionState> state,
                ix::WebSocket&                       ws,
@@ -13,6 +20,9 @@ WebSocketServer::WebSocketServer(int port)
         {
             if (msg->type == ix::WebSocketMessageType::Open) {
                 connManager_.addClient(&ws);
+                // Send the full current dataset to the newly connected client
+                // so it isn't staring at an empty table.
+                connManager_.sendTo(&ws, makeBroadcastUpdate(repo_.getAll()));
                 std::cout << "[server] client connected    id=" << state->getId() << "\n";
 
             } else if (msg->type == ix::WebSocketMessageType::Close) {
@@ -29,10 +39,12 @@ WebSocketServer::WebSocketServer(int port)
     );
 }
 
-void WebSocketServer::handleMessage(ix::WebSocket& ws, const std::string& raw) {
-    std::cout << "[server] received: " << raw << "\n";
+// ── Message handler: the section 4.4 pipeline ────────────────────────────
 
-    // ── Stage 1: parse JSON ────────────────────────────────────────────────
+void WebSocketServer::handleMessage(ix::WebSocket& ws, const std::string& raw) {
+    std::cout << "[server] recv: " << raw << "\n";
+
+    // ── Stage 1: parse JSON ───────────────────────────────────────────────
     auto parsed = ClientMessage::parse(raw);
     if (!parsed) {
         connManager_.sendTo(&ws, makeError("Malformed JSON or missing 'action' field"));
@@ -40,13 +52,10 @@ void WebSocketServer::handleMessage(ix::WebSocket& ws, const std::string& raw) {
     }
 
     const Action action = parsed->action;
-    std::cout << "[server] action=" << actionToString(action) << "\n";
 
-    // ── Stage 2: validate payload (CREATE and UPDATE only) ────────────────
+    // ── Stage 2: validate (CREATE and UPDATE require full student object) ─
+    Student s;
     if (action == Action::CREATE || action == Action::UPDATE) {
-        // The full student object must be present — UPDATE replaces the
-        // entire record, so all four fields are always required.
-        Student s;
         try {
             s = Student::fromJson(parsed->data);
         } catch (const std::exception& e) {
@@ -54,25 +63,104 @@ void WebSocketServer::handleMessage(ix::WebSocket& ws, const std::string& raw) {
                 makeError(std::string("Invalid payload: ") + e.what()));
             return;
         }
-
-        auto result = StudentValidator::validate(s);
-        if (!result.valid) {
-            std::cout << "[server] validation failed: " << result.error << "\n";
-            connManager_.sendTo(&ws, makeError(result.error));
-            return;     // ← stop here; repository never called with invalid data
+        auto vr = StudentValidator::validate(s);
+        if (!vr.valid) {
+            connManager_.sendTo(&ws, makeError(vr.error));
+            return;
         }
-
-        // Validation passed — repository not wired yet (Phase 9)
-        std::cout << "[server] validation passed for id=" << s.id
-                  << " — repository not yet wired (Phase 9)\n";
-        connManager_.sendTo(&ws, makeError("Repository not yet wired — Phase 9"));
-        return;
     }
 
-    // ── Other actions: echo raw message back for now ───────────────────────
-    // DELETE / LIST / SEARCH / SORT will get real handlers in Phase 9.
-    connManager_.sendTo(&ws, raw);
+    // ── Stage 3 + 4: repository call, then persist + broadcast or reply ───
+    switch (action) {
+
+        // ── Mutations ────────────────────────────────────────────────────
+
+        case Action::CREATE: {
+            if (!repo_.addStudent(s)) {
+                connManager_.sendTo(&ws, makeError("Student ID already exists"));
+                return;
+            }
+            // Snapshot rule: ONE getAll(), reused for both save and broadcast.
+            auto snapshot = repo_.getAll();
+            CSVHandler::saveToFile(csvPath_, snapshot);
+            connManager_.broadcast(makeBroadcastUpdate(snapshot));
+            std::cout << "[server] CREATE ok id=" << s.id << "\n";
+            break;
+        }
+
+        case Action::UPDATE: {
+            if (!repo_.updateStudent(s)) {
+                connManager_.sendTo(&ws, makeError("Student not found"));
+                return;
+            }
+            auto snapshot = repo_.getAll();
+            CSVHandler::saveToFile(csvPath_, snapshot);
+            connManager_.broadcast(makeBroadcastUpdate(snapshot));
+            std::cout << "[server] UPDATE ok id=" << s.id << "\n";
+            break;
+        }
+
+        case Action::DELETE: {
+            int id;
+            try {
+                id = parsed->data.at("id").get<int>();
+            } catch (...) {
+                connManager_.sendTo(&ws, makeError("DELETE requires {\"id\": <int>}"));
+                return;
+            }
+            if (!repo_.deleteStudent(id)) {
+                connManager_.sendTo(&ws, makeError("Student not found"));
+                return;
+            }
+            auto snapshot = repo_.getAll();
+            CSVHandler::saveToFile(csvPath_, snapshot);
+            connManager_.broadcast(makeBroadcastUpdate(snapshot));
+            std::cout << "[server] DELETE ok id=" << id << "\n";
+            break;
+        }
+
+        // ── Read-only queries: reply to sender only, no CSV write ────────
+
+        case Action::LIST: {
+            connManager_.sendTo(&ws, makeQueryResult(repo_.getAll()));
+            break;
+        }
+
+        case Action::SEARCH: {
+            std::string query;
+            try {
+                query = parsed->data.at("query").get<std::string>();
+            } catch (...) {
+                connManager_.sendTo(&ws, makeError("SEARCH requires {\"query\": <string>}"));
+                return;
+            }
+            connManager_.sendTo(&ws, makeQueryResult(repo_.findByName(query)));
+            break;
+        }
+
+        case Action::SORT: {
+            std::string field;
+            try {
+                field = parsed->data.at("field").get<std::string>();
+            } catch (...) {
+                connManager_.sendTo(&ws, makeError("SORT requires {\"field\": \"id\"|\"name\"|\"age\"|\"grade\"}"));
+                return;
+            }
+            SortField sf = SortField::ID;
+            if      (field == "name")  sf = SortField::NAME;
+            else if (field == "age")   sf = SortField::AGE;
+            else if (field == "grade") sf = SortField::GRADE;
+            connManager_.sendTo(&ws, makeQueryResult(repo_.sortBy(sf)));
+            break;
+        }
+
+        default:
+            connManager_.sendTo(&ws, makeError("Unknown action: " + actionToString(action)));
+            break;
+    }
 }
+
+// ── run ───────────────────────────────────────────────────────────────────
 
 void WebSocketServer::run() {
     bool ok = server_.listenAndStart();
