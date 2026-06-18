@@ -37,13 +37,131 @@ make test
 
 ## How It Works
 
-There are three pieces:
+Three components, one protocol:
 
-- **Server** — owns all the data. Loads `students.csv` at startup. Every change is saved back to the file and broadcast to all connected clients.
+- **Server** — the single source of truth. Loads `students.csv` at startup. Every mutation is saved back to disk and broadcast to all connected clients immediately.
 - **CLI Client** — a terminal menu to list, search, add, update, delete, and sort students.
 - **Browser UI** — the same operations in a web page. Open multiple tabs — they all update live.
 
-Any change made from the CLI client immediately appears in the browser, and vice versa.
+The server treats CLI clients and browser tabs as peers. Both speak the same JSON protocol over WebSocket. A change made from one client instantly appears in all others.
+
+---
+
+## Architecture
+
+### Class Diagram
+
+```mermaid
+classDiagram
+    class Student {
+        +int id
+        +string name
+        +int age
+        +string grade
+        +toJson() json
+        +fromJson(json) Student
+    }
+
+    class StudentRepository {
+        -vector~Student~ students
+        -shared_mutex rw_mutex
+        +addStudent(Student) bool
+        +getAll() vector~Student~
+        +findById(int) optional~Student~
+        +findByName(string) vector~Student~
+        +updateStudent(Student) bool
+        +deleteStudent(int) bool
+        +sortBy(SortField) vector~Student~
+        +loadFromCSV(path)
+    }
+
+    class StudentValidator {
+        +validate(Student) ValidationResult
+    }
+
+    class CSVHandler {
+        +loadFromFile(path) vector~Student~
+        +saveToFile(path, vector~Student~)
+    }
+
+    class ConnectionManager {
+        -vector~WebSocket*~ clients
+        -mutex clients_mutex
+        +addClient(WebSocket*)
+        +removeClient(WebSocket*)
+        +broadcast(string)
+        +sendTo(WebSocket*, string)
+    }
+
+    class WebSocketServer {
+        -StudentRepository repo
+        -ConnectionManager connManager
+        -int port
+        -string csvPath
+        +run()
+        -handleMessage(WebSocket, string)
+    }
+
+    WebSocketServer --> StudentRepository
+    WebSocketServer --> ConnectionManager
+    WebSocketServer --> StudentValidator
+    WebSocketServer --> CSVHandler
+    StudentRepository --> Student
+    CSVHandler --> Student
+```
+
+### Startup Sequence
+
+```mermaid
+sequenceDiagram
+    participant M as main
+    participant S as WebSocketServer
+    participant CSV as CSVHandler
+    participant R as StudentRepository
+    participant C as Client
+
+    M->>S: WebSocketServer(port, csvPath)
+    S->>CSV: loadFromFile(csvPath)
+    CSV-->>S: 500 Student records
+    S->>R: loadFromCSV — seeds in-memory store
+    M->>S: run()
+    S->>S: listenAndStart()
+    Note over S: Listening on ws://localhost:8080
+
+    C->>S: WebSocket connect
+    S->>R: getAll()
+    R-->>S: current snapshot
+    S->>C: BROADCAST_UPDATE (full dataset)
+    Note over C: Table renders immediately on connect
+```
+
+### CREATE Sequence
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as WebSocketServer
+    participant V as StudentValidator
+    participant R as StudentRepository
+    participant CSV as CSVHandler
+    participant CM as ConnectionManager
+    participant O as Other Clients
+
+    C->>S: {"action":"CREATE","data":{id,name,age,grade}}
+    S->>S: ClientMessage::parse()
+    S->>V: validate(student)
+    V-->>S: {valid: true}
+    S->>R: addStudent(student)
+    R-->>S: true
+    S->>R: getAll() — one snapshot
+    R-->>S: snapshot
+    S->>CSV: saveToFile(path, snapshot)
+    S->>CM: broadcast(BROADCAST_UPDATE, snapshot)
+    CM-->>C: BROADCAST_UPDATE
+    CM-->>O: BROADCAST_UPDATE
+```
+
+> If validation fails or the ID already exists, the server replies with `{"action":"ERROR","message":"..."}` to the sender only — no broadcast, no file write.
 
 ---
 
@@ -75,23 +193,14 @@ Any change made from the CLI client immediately appears in the browser, and vice
 
 ## Performance
 
-Measured on Apple M-series, loopback, 6-student dataset. Press Ctrl-C on the server to see live numbers.
+Measured on Apple M-series, loopback, 500-student dataset, 2 connected clients. Press Ctrl-C on the server to see live numbers.
 
 | Operation | Avg (µs) | Notes |
 |---|---|---|
-| CSV load | 361 | Once at startup |
-| Sort | 13 | Returns a sorted copy |
-| WebSocket transmit | 25 | Per client, per send |
-| CSV save | 613 | Full file rewrite on every mutation |
-| Broadcast | 27 | Full loop over all connected clients |
+| CSV load | 1650 | Once at startup |
+| Sort | 241 | Returns a sorted copy — original order unchanged |
+| CSV save | 381 | Full file rewrite on every mutation |
+| WebSocket transmit | 496 | Per client, per send (500-record payload) |
+| Broadcast | 996 | Full loop over all connected clients |
 
-`csv_save` is the slowest operation because the file is completely rewritten on every change. All others are well under 1 ms at this scale.
-
----
-
-## Known Limitations
-
-- **Commas in names will break CSV parsing.** A name like `Smith, Jr.` contains a comma that the parser treats as a field separator. Not a problem with normal names.
-- **No reconnect logic.** If the server restarts, refresh the browser or re-run the CLI client.
-- **No TLS.** Runs on plain `ws://` — fine for local use, not for production over a network.
-- **Performance numbers are from a 6-row dataset.** They are illustrative; run with a larger CSV for meaningful benchmarks.
+`csv_load` runs once. All per-request operations complete in under 1 ms at this scale.
