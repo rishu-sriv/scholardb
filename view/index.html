@@ -2,105 +2,384 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>ScholarDB — Phase 4 echo test</title>
+  <title>ScholarDB</title>
   <style>
-    body        { font-family: monospace; max-width: 640px; margin: 40px auto; background: #111; color: #eee; }
-    h1          { font-size: 1.1rem; color: #aaa; margin-bottom: 24px; }
-    #status     { margin-bottom: 16px; }
-    .dot        { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
-                  background: #555; margin-right: 8px; }
-    .dot.open   { background: #4c4; }
-    .dot.closed { background: #c44; }
-    button      { font-family: monospace; padding: 6px 14px; margin-right: 8px;
-                  background: #222; color: #eee; border: 1px solid #555; cursor: pointer; }
-    button:disabled { opacity: 0.4; cursor: default; }
-    #log        { margin-top: 20px; background: #1a1a1a; border: 1px solid #333;
-                  padding: 12px; height: 260px; overflow-y: auto; }
-    .row        { margin: 3px 0; }
-    .row.sent   { color: #7af; }
-    .row.recv   { color: #4c4; }
-    .row.info   { color: #aaa; }
-    .row.err    { color: #f66; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: monospace;
+      background: #0f0f0f;
+      color: #ddd;
+      padding: 32px 24px;
+      max-width: 820px;
+      margin: 0 auto;
+    }
+
+    h1 { font-size: 1.3rem; color: #fff; margin-bottom: 6px; }
+
+    /* ── status bar ─────────────────────────────────────────────────── */
+    #status-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 24px;
+      font-size: 0.85rem;
+      color: #888;
+    }
+    .dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: #444;
+      flex-shrink: 0;
+    }
+    .dot.connected    { background: #3d3; }
+    .dot.disconnected { background: #d33; }
+
+    /* ── table ──────────────────────────────────────────────────────── */
+    #table-wrap {
+      overflow-x: auto;
+      margin-bottom: 24px;
+      border: 1px solid #2a2a2a;
+      border-radius: 4px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    th {
+      background: #1a1a1a;
+      color: #aaa;
+      text-align: left;
+      padding: 8px 12px;
+      font-weight: normal;
+      border-bottom: 1px solid #2a2a2a;
+    }
+    td { padding: 7px 12px; border-bottom: 1px solid #1e1e1e; }
+    tr:last-child td { border-bottom: none; }
+    tr.data-row:hover { background: #1a1a1a; cursor: pointer; }
+    tr.selected       { background: #1d2a1d; }
+    #empty-row td { color: #555; font-style: italic; text-align: center; }
+
+    /* ── section labels ─────────────────────────────────────────────── */
+    .section-label {
+      font-size: 0.75rem;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin-bottom: 10px;
+    }
+
+    /* ── form ───────────────────────────────────────────────────────── */
+    #manage { margin-bottom: 20px; }
+    .field-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 10px;
+      align-items: center;
+    }
+    .field-row label { font-size: 0.8rem; color: #888; margin-right: 4px; }
+    .field-row input {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      color: #eee;
+      font-family: monospace;
+      font-size: 0.9rem;
+      padding: 5px 8px;
+      border-radius: 3px;
+      width: 100px;
+      outline: none;
+    }
+    .field-row input:focus { border-color: #555; }
+    #inp-name { width: 180px; }
+
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      font-family: monospace;
+      font-size: 0.85rem;
+      padding: 6px 14px;
+      background: #1e1e1e;
+      color: #ccc;
+      border: 1px solid #3a3a3a;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: #282828; border-color: #555; }
+    button:disabled { opacity: 0.35; cursor: default; }
+    button.primary  { border-color: #3a5a3a; color: #8d8; }
+    button.danger   { border-color: #5a3a3a; color: #d88; }
+
+    /* ── search / sort ──────────────────────────────────────────────── */
+    #filter { margin-bottom: 24px; }
+    .filter-row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 10px;
+      align-items: center;
+    }
+    .filter-row input, .filter-row select {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      color: #eee;
+      font-family: monospace;
+      font-size: 0.9rem;
+      padding: 5px 8px;
+      border-radius: 3px;
+      outline: none;
+    }
+    .filter-row input  { width: 220px; }
+    .filter-row select { width: 120px; }
+
+    /* ── status message ─────────────────────────────────────────────── */
+    #msg {
+      font-size: 0.85rem;
+      min-height: 1.4em;
+      padding: 6px 10px;
+      border-radius: 3px;
+      background: #161616;
+      border: 1px solid #222;
+      color: #888;
+    }
+    #msg.ok  { color: #6b6; border-color: #2a3a2a; }
+    #msg.err { color: #d66; border-color: #3a2a2a; }
   </style>
 </head>
 <body>
 
-<h1>ScholarDB — WebSocket echo test (Phase 4)</h1>
+<h1>ScholarDB</h1>
 
-<div id="status">
-  <span class="dot" id="dot"></span>
-  <span id="status-text">Disconnected</span>
+<div id="status-bar">
+  <span class="dot disconnected" id="dot"></span>
+  <span id="status-text">Connecting…</span>
 </div>
 
-<button id="btn-connect">Connect</button>
-<button id="btn-send" disabled>Send test message</button>
-<button id="btn-disconnect" disabled>Disconnect</button>
+<!-- ── Student table ──────────────────────────────────────────────────── -->
+<div id="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th><th>Name</th><th>Age</th><th>Grade</th>
+      </tr>
+    </thead>
+    <tbody id="tbody">
+      <tr id="empty-row"><td colspan="4">Waiting for data…</td></tr>
+    </tbody>
+  </table>
+</div>
 
-<div id="log"></div>
+<!-- ── Manage ─────────────────────────────────────────────────────────── -->
+<div id="manage">
+  <p class="section-label">Manage — click a row to prefill</p>
+  <div class="field-row">
+    <label>ID</label>    <input id="inp-id"    type="number" placeholder="101">
+    <label>Name</label>  <input id="inp-name"  type="text"   placeholder="Alice Johnson">
+    <label>Age</label>   <input id="inp-age"   type="number" placeholder="20">
+    <label>Grade</label> <input id="inp-grade" type="text"   placeholder="A">
+  </div>
+  <div class="btn-row">
+    <button class="primary" id="btn-add"    disabled>Add</button>
+    <button                 id="btn-update" disabled>Update</button>
+    <button class="danger"  id="btn-delete" disabled>Delete</button>
+    <button                 id="btn-clear">Clear</button>
+  </div>
+</div>
+
+<!-- ── Filter / Sort ──────────────────────────────────────────────────── -->
+<div id="filter">
+  <p class="section-label">Filter / Sort</p>
+  <div class="filter-row">
+    <input id="inp-search" type="text" placeholder="Search by name…">
+    <button id="btn-search" disabled>Search</button>
+    <button id="btn-list"   disabled>Show all</button>
+  </div>
+  <div class="filter-row">
+    <select id="sel-sort">
+      <option value="id">Sort by ID</option>
+      <option value="name">Sort by Name</option>
+      <option value="age">Sort by Age</option>
+      <option value="grade">Sort by Grade</option>
+    </select>
+    <button id="btn-sort" disabled>Sort</button>
+  </div>
+</div>
+
+<!-- ── Status message ─────────────────────────────────────────────────── -->
+<div id="msg">Ready.</div>
 
 <script>
   const SERVER = 'ws://localhost:8080';
 
-  const dot        = document.getElementById('dot');
-  const statusText = document.getElementById('status-text');
-  const btnConnect = document.getElementById('btn-connect');
-  const btnSend    = document.getElementById('btn-send');
-  const btnDisc    = document.getElementById('btn-disconnect');
-  const log        = document.getElementById('log');
+  // ── element refs ────────────────────────────────────────────────────────
+  const dot       = document.getElementById('dot');
+  const statusTxt = document.getElementById('status-text');
+  const tbody     = document.getElementById('tbody');
+  const emptyRow  = document.getElementById('empty-row');
+  const inpId     = document.getElementById('inp-id');
+  const inpName   = document.getElementById('inp-name');
+  const inpAge    = document.getElementById('inp-age');
+  const inpGrade  = document.getElementById('inp-grade');
+  const inpSearch = document.getElementById('inp-search');
+  const selSort   = document.getElementById('sel-sort');
+  const msgEl     = document.getElementById('msg');
+
+  const allButtons = document.querySelectorAll('button[id]');
 
   let ws = null;
-  let msgCount = 0;
 
-  function appendLog(text, cls) {
-    const row = document.createElement('div');
-    row.className = 'row ' + cls;
-    row.textContent = text;
-    log.appendChild(row);
-    log.scrollTop = log.scrollHeight;
+  // ── helpers ─────────────────────────────────────────────────────────────
+  function setStatus(connected) {
+    dot.className       = 'dot ' + (connected ? 'connected' : 'disconnected');
+    statusTxt.textContent = connected
+      ? 'Connected to ' + SERVER
+      : 'Disconnected — reload to reconnect';
+    allButtons.forEach(b => {
+      if (b.id !== 'btn-clear') b.disabled = !connected;
+    });
   }
 
-  function setConnected(open) {
-    dot.className       = 'dot ' + (open ? 'open' : 'closed');
-    statusText.textContent = open ? 'Connected to ' + SERVER : 'Disconnected';
-    btnConnect.disabled  = open;
-    btnSend.disabled     = !open;
-    btnDisc.disabled     = !open;
+  function showMsg(text, kind) {   // kind: 'ok' | 'err' | ''
+    msgEl.textContent = text;
+    msgEl.className   = kind || '';
   }
 
-  btnConnect.addEventListener('click', () => {
-    appendLog('Connecting to ' + SERVER + ' …', 'info');
+  function clearForm() {
+    inpId.value = inpName.value = inpAge.value = inpGrade.value = '';
+    document.querySelectorAll('tr.selected').forEach(r => r.classList.remove('selected'));
+  }
+
+  function send(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  }
+
+  // ── table rendering — clear-and-re-render, no diffing ───────────────────
+  function renderTable(students) {
+    // Remove all data rows, keep the empty-row sentinel
+    Array.from(tbody.querySelectorAll('tr.data-row')).forEach(r => r.remove());
+
+    if (!students || students.length === 0) {
+      emptyRow.style.display = '';
+      emptyRow.querySelector('td').textContent = '(no records)';
+      return;
+    }
+
+    emptyRow.style.display = 'none';
+
+    students.forEach(s => {
+      const tr = document.createElement('tr');
+      tr.className = 'data-row';
+      tr.innerHTML =
+        `<td>${s.id}</td><td>${escHtml(s.name)}</td><td>${s.age}</td><td>${escHtml(s.grade)}</td>`;
+
+      // Click row → prefill form
+      tr.addEventListener('click', () => {
+        document.querySelectorAll('tr.selected').forEach(r => r.classList.remove('selected'));
+        tr.classList.add('selected');
+        inpId.value    = s.id;
+        inpName.value  = s.name;
+        inpAge.value   = s.age;
+        inpGrade.value = s.grade;
+      });
+
+      tbody.appendChild(tr);
+    });
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // ── WebSocket ─────────────────────────────────────────────────────────
+  function connect() {
     ws = new WebSocket(SERVER);
 
     ws.onopen = () => {
-      setConnected(true);
-      appendLog('Connection established.', 'info');
+      setStatus(true);
+      showMsg('Connected. Waiting for data…', '');
     };
 
     ws.onmessage = (event) => {
-      appendLog('← echo: ' + event.data, 'recv');
+      const msg = JSON.parse(event.data);
+
+      if (msg.action === 'BROADCAST_UPDATE') {
+        renderTable(msg.data);
+        showMsg('Live update — ' + msg.data.length + ' student(s)', 'ok');
+
+      } else if (msg.action === 'QUERY_RESULT') {
+        renderTable(msg.data);
+        showMsg('Query result — ' + msg.data.length + ' student(s)', 'ok');
+
+      } else if (msg.action === 'ERROR') {
+        showMsg('Error: ' + msg.message, 'err');
+      }
     };
 
-    ws.onerror = () => {
-      appendLog('WebSocket error — is the server running?', 'err');
-    };
+    ws.onerror = () => showMsg('WebSocket error — is the server running?', 'err');
 
     ws.onclose = () => {
-      setConnected(false);
-      appendLog('Connection closed.', 'info');
+      setStatus(false);
+      showMsg('Disconnected from server.', 'err');
       ws = null;
     };
+  }
+
+  // ── button handlers ──────────────────────────────────────────────────
+  document.getElementById('btn-add').addEventListener('click', () => {
+    send({ action: 'CREATE', data: {
+      id:    parseInt(inpId.value),
+      name:  inpName.value.trim(),
+      age:   parseInt(inpAge.value),
+      grade: inpGrade.value.trim()
+    }});
+    showMsg('Sending CREATE…', '');
   });
 
-  btnSend.addEventListener('click', () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const msg = 'hello from browser #' + (++msgCount);
-    ws.send(msg);
-    appendLog('→ sent: ' + msg, 'sent');
+  document.getElementById('btn-update').addEventListener('click', () => {
+    send({ action: 'UPDATE', data: {
+      id:    parseInt(inpId.value),
+      name:  inpName.value.trim(),
+      age:   parseInt(inpAge.value),
+      grade: inpGrade.value.trim()
+    }});
+    showMsg('Sending UPDATE…', '');
   });
 
-  btnDisc.addEventListener('click', () => {
-    if (ws) ws.close();
+  document.getElementById('btn-delete').addEventListener('click', () => {
+    const id = parseInt(inpId.value);
+    if (!id) { showMsg('Enter an ID to delete.', 'err'); return; }
+    send({ action: 'DELETE', data: { id } });
+    showMsg('Sending DELETE ' + id + '…', '');
+    clearForm();
   });
+
+  document.getElementById('btn-clear').addEventListener('click', clearForm);
+
+  document.getElementById('btn-search').addEventListener('click', () => {
+    const q = inpSearch.value.trim();
+    send({ action: 'SEARCH', data: { query: q } });
+    showMsg('Searching for "' + q + '"…', '');
+  });
+
+  document.getElementById('btn-list').addEventListener('click', () => {
+    send({ action: 'LIST', data: {} });
+    showMsg('Fetching full list…', '');
+  });
+
+  document.getElementById('btn-sort').addEventListener('click', () => {
+    const field = selSort.value;
+    send({ action: 'SORT', data: { field } });
+    showMsg('Sorting by ' + field + '…', '');
+  });
+
+  // Search on Enter key
+  inpSearch.addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('btn-search').click();
+  });
+
+  // ── auto-connect on page load ────────────────────────────────────────
+  connect();
 </script>
 
 </body>

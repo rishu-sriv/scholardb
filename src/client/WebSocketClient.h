@@ -4,37 +4,39 @@
 #include <string>
 #include <mutex>
 #include <condition_variable>
-#include <queue>
 
-// WebSocketClient wraps ix::WebSocket and provides a blocking run() loop.
-//
 // Threading model:
-//   - ix callback thread: pushes received messages into inbox_
-//   - main thread:        calls waitForMessage() which blocks until inbox_
-//                         has something, then processes and re-shows menu
+//   ix callback thread  — receives messages, either stores them as a reply
+//                         or prints them immediately as a live update.
+//   main thread         — sets expectReply_ = true (under lock) BEFORE
+//                         sending a command, then blocks on waitForReply().
+//
+// This prevents the stale-inbox bug: an unsolicited broadcast that arrives
+// while the user is at the menu prompt is printed right away instead of
+// being queued and later consumed as the reply to the next operation.
 class WebSocketClient {
 public:
     explicit WebSocketClient(const std::string& url);
-
-    // Connects to the server, waits for the initial BROADCAST_UPDATE,
-    // then runs the interactive CLI menu until the user quits.
     void run();
 
 private:
-    // Block until the server sends a message, return it.
-    std::string waitForMessage();
+    // Set expectReply_ = true, send the message, block until reply arrives.
+    std::string sendAndWait(const std::string& msg);
 
-    // Send a pre-built JSON string to the server.
-    void send(const std::string& msg);
+    // Wait for the very first message after connect (initial BROADCAST_UPDATE)
+    // without sending anything.
+    std::string waitForFirst();
 
-    // Display a student array from a BROADCAST_UPDATE or QUERY_RESULT.
-    void printStudents(const std::string& raw);
+    void printStudents(const std::string& raw, const std::string& label = "");
+    void printLiveUpdate(const std::string& raw);
 
     ix::WebSocket ws_;
     std::string   url_;
 
     std::mutex              mtx_;
     std::condition_variable cv_;
-    std::queue<std::string> inbox_;
-    bool                    connected_ = false;
+    bool                    connected_   = false;
+    bool                    expectReply_ = false;
+    bool                    replyReady_  = false;
+    std::string             reply_;
 };

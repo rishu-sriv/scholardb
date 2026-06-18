@@ -10,27 +10,39 @@ WebSocketClient::WebSocketClient(const std::string& url) : url_(url) {
 
     ws_.setOnMessageCallback(
         [this](const ix::WebSocketMessagePtr& msg) {
+
             if (msg->type == ix::WebSocketMessageType::Open) {
                 std::unique_lock<std::mutex> lock(mtx_);
                 connected_ = true;
                 cv_.notify_all();
+                return;
+            }
 
-            } else if (msg->type == ix::WebSocketMessageType::Message) {
-                // Push every incoming message into the inbox for the main
-                // thread to consume via waitForMessage().
+            if (msg->type == ix::WebSocketMessageType::Close) {
+                std::cout << "\n[client] server closed the connection\n";
+                return;
+            }
+
+            if (msg->type == ix::WebSocketMessageType::Error) {
+                std::cerr << "\n[client] error: " << msg->errorInfo.reason << "\n";
+                return;
+            }
+
+            if (msg->type == ix::WebSocketMessageType::Message) {
                 std::unique_lock<std::mutex> lock(mtx_);
-                inbox_.push(msg->str);
-                cv_.notify_one();
 
-            } else if (msg->type == ix::WebSocketMessageType::Error) {
-                std::cerr << "[client] error: " << msg->errorInfo.reason << "\n";
-                // Unblock any waiting main thread
-                std::unique_lock<std::mutex> lock(mtx_);
-                inbox_.push(makeError(msg->errorInfo.reason));
-                cv_.notify_one();
-
-            } else if (msg->type == ix::WebSocketMessageType::Close) {
-                std::cout << "[client] disconnected from server\n";
+                if (expectReply_) {
+                    // Main thread is waiting for exactly this message.
+                    reply_       = msg->str;
+                    replyReady_  = true;
+                    expectReply_ = false;
+                    cv_.notify_one();
+                } else {
+                    // Unsolicited broadcast from another client's mutation.
+                    // Print immediately — do NOT queue it.
+                    lock.unlock();
+                    printLiveUpdate(msg->str);
+                }
             }
         }
     );
@@ -38,19 +50,35 @@ WebSocketClient::WebSocketClient(const std::string& url) : url_(url) {
 
 // ── Internal helpers ──────────────────────────────────────────────────────
 
-std::string WebSocketClient::waitForMessage() {
-    std::unique_lock<std::mutex> lock(mtx_);
-    cv_.wait(lock, [this] { return !inbox_.empty(); });
-    std::string msg = inbox_.front();
-    inbox_.pop();
-    return msg;
-}
-
-void WebSocketClient::send(const std::string& msg) {
+std::string WebSocketClient::sendAndWait(const std::string& msg) {
+    {
+        // Set the flag BEFORE sending so there is no window where the reply
+        // can arrive and be mistaken for a live update.
+        std::unique_lock<std::mutex> lock(mtx_);
+        expectReply_ = true;
+        replyReady_  = false;
+    }
     ws_.send(msg);
+
+    std::unique_lock<std::mutex> lock(mtx_);
+    cv_.wait(lock, [this] { return replyReady_; });
+    return reply_;
 }
 
-void WebSocketClient::printStudents(const std::string& raw) {
+std::string WebSocketClient::waitForFirst() {
+    // Same as sendAndWait but without sending — used for the initial
+    // BROADCAST_UPDATE the server pushes on connect.
+    {
+        std::unique_lock<std::mutex> lock(mtx_);
+        expectReply_ = true;
+        replyReady_  = false;
+    }
+    std::unique_lock<std::mutex> lock(mtx_);
+    cv_.wait(lock, [this] { return replyReady_; });
+    return reply_;
+}
+
+void WebSocketClient::printStudents(const std::string& raw, const std::string& label) {
     try {
         auto j = nlohmann::json::parse(raw);
         std::string action = j.value("action", "");
@@ -61,18 +89,21 @@ void WebSocketClient::printStudents(const std::string& raw) {
         }
 
         auto& arr = j["data"];
+        if (!label.empty()) std::cout << label << "\n";
+
         if (!arr.is_array() || arr.empty()) {
             std::cout << "  (no records)\n";
             return;
         }
 
-        std::printf("\n  %-4s  %-20s  %-4s  %s\n", "ID", "Name", "Age", "Grade");
-        std::printf("  %-4s  %-20s  %-4s  %s\n", "----", "--------------------", "----", "-----");
+        std::printf("  %-4s  %-20s  %-4s  %s\n", "ID", "Name", "Age", "Grade");
+        std::printf("  %-4s  %-20s  %-4s  %s\n",
+                    "----", "--------------------", "----", "-----");
         for (auto& s : arr) {
             std::printf("  %-4d  %-20s  %-4d  %s\n",
-                s.value("id", 0),
-                s.value("name", "").c_str(),
-                s.value("age", 0),
+                s.value("id",    0),
+                s.value("name",  "").c_str(),
+                s.value("age",   0),
                 s.value("grade", "").c_str());
         }
         std::printf("  %zu record(s)\n", arr.size());
@@ -81,22 +112,26 @@ void WebSocketClient::printStudents(const std::string& raw) {
     }
 }
 
-// ── run() — connect, wait for initial broadcast, then menu loop ───────────
+void WebSocketClient::printLiveUpdate(const std::string& raw) {
+    std::cout << "\n[LIVE UPDATE from another client]\n";
+    printStudents(raw);
+    std::cout << "> " << std::flush;   // re-print the menu prompt
+}
+
+// ── run() ─────────────────────────────────────────────────────────────────
 
 void WebSocketClient::run() {
     ws_.start();
 
-    // Wait for the WebSocket connection to open
+    // Wait for WebSocket handshake to complete
     {
         std::unique_lock<std::mutex> lock(mtx_);
         cv_.wait(lock, [this] { return connected_; });
     }
     std::cout << "[client] connected to " << url_ << "\n";
 
-    // The server immediately sends a BROADCAST_UPDATE on connect —
-    // display it as the starting dataset.
-    std::cout << "[client] current dataset:\n";
-    printStudents(waitForMessage());
+    // Capture the initial BROADCAST_UPDATE the server sends on connect
+    printStudents(waitForFirst(), "[client] current dataset:");
 
     // ── Menu loop ─────────────────────────────────────────────────────────
     while (true) {
@@ -109,19 +144,18 @@ void WebSocketClient::run() {
         if (choice == 0) break;
 
         if (choice == 1) {
-            // LIST — QUERY_RESULT comes back to sender only
-            send(nlohmann::json{{"action","LIST"},{"data",nlohmann::json::object()}}.dump());
-            printStudents(waitForMessage());
+            auto reply = sendAndWait(
+                nlohmann::json{{"action","LIST"},{"data",nlohmann::json::object()}}.dump());
+            printStudents(reply);
 
         } else if (choice == 2) {
-            // SEARCH
             std::cout << "Name (substring): ";
             std::string q; std::getline(std::cin, q);
-            send(nlohmann::json{{"action","SEARCH"},{"data",{{"query",q}}}}.dump());
-            printStudents(waitForMessage());
+            auto reply = sendAndWait(
+                nlohmann::json{{"action","SEARCH"},{"data",{{"query",q}}}}.dump());
+            printStudents(reply);
 
         } else if (choice == 3) {
-            // CREATE
             Student s;
             std::cout << "ID: ";    std::cin >> s.id;
             std::cin.ignore(1000, '\n');
@@ -129,12 +163,11 @@ void WebSocketClient::run() {
             std::cout << "Age: ";   std::cin >> s.age;
             std::cin.ignore(1000, '\n');
             std::cout << "Grade: "; std::getline(std::cin, s.grade);
-            send(nlohmann::json{{"action","CREATE"},{"data",s.toJson()}}.dump());
-            // Server broadcasts to ALL on success, or sends ERROR to us on failure
-            printStudents(waitForMessage());
+            auto reply = sendAndWait(
+                nlohmann::json{{"action","CREATE"},{"data",s.toJson()}}.dump());
+            printStudents(reply);
 
         } else if (choice == 4) {
-            // UPDATE — send full record (no partial updates per protocol)
             Student s;
             std::cout << "ID to update: "; std::cin >> s.id;
             std::cin.ignore(1000, '\n');
@@ -142,27 +175,28 @@ void WebSocketClient::run() {
             std::cout << "New age: ";   std::cin >> s.age;
             std::cin.ignore(1000, '\n');
             std::cout << "New grade: "; std::getline(std::cin, s.grade);
-            send(nlohmann::json{{"action","UPDATE"},{"data",s.toJson()}}.dump());
-            printStudents(waitForMessage());
+            auto reply = sendAndWait(
+                nlohmann::json{{"action","UPDATE"},{"data",s.toJson()}}.dump());
+            printStudents(reply);
 
         } else if (choice == 5) {
-            // DELETE
             int id;
             std::cout << "ID to delete: "; std::cin >> id;
             std::cin.ignore(1000, '\n');
-            send(nlohmann::json{{"action","DELETE"},{"data",{{"id",id}}}}.dump());
-            printStudents(waitForMessage());
+            auto reply = sendAndWait(
+                nlohmann::json{{"action","DELETE"},{"data",{{"id",id}}}}.dump());
+            printStudents(reply);
 
         } else if (choice == 6) {
-            // SORT
             std::cout << "Sort by — 1)id  2)name  3)age  4)grade\n> ";
             int f; std::cin >> f; std::cin.ignore(1000, '\n');
             std::string field = "id";
             if      (f == 2) field = "name";
             else if (f == 3) field = "age";
             else if (f == 4) field = "grade";
-            send(nlohmann::json{{"action","SORT"},{"data",{{"field",field}}}}.dump());
-            printStudents(waitForMessage());
+            auto reply = sendAndWait(
+                nlohmann::json{{"action","SORT"},{"data",{{"field",field}}}}.dump());
+            printStudents(reply);
 
         } else {
             std::cout << "Unknown option.\n";

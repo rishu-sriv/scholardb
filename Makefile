@@ -1,7 +1,7 @@
 CMAKE     := /opt/homebrew/bin/cmake
 BUILD_DIR := build
 
-.PHONY: all build run run-server run-client clean
+.PHONY: all build run run-server run-client open-browser clean
 
 all: build
 
@@ -13,13 +13,17 @@ build:
 run: build
 	./$(BUILD_DIR)/phase1_loader students.csv
 
-# Phase 3 — bare WebSocket echo server
+# Phase 3+ — WebSocket server (loads students.csv, runs on :8080)
 run-server: build
 	./$(BUILD_DIR)/server
 
-# Phase 5 — C++ CLI client (sends one hardcoded message, prints echo)
+# Phase 5+ — C++ CLI client
 run-client: build
 	./$(BUILD_DIR)/client
+
+# Phase 10 — open browser UI (requires server already running)
+open-browser:
+	open view/index.html
 
 clean:
 	rm -rf $(BUILD_DIR)
