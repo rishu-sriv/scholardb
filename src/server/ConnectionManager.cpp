@@ -1,4 +1,5 @@
 #include "ConnectionManager.h"
+#include "../common/Timer.h"
 #include <iostream>
 
 void ConnectionManager::addClient(ix::WebSocket* ws) {
@@ -14,8 +15,10 @@ void ConnectionManager::removeClient(ix::WebSocket* ws) {
 }
 
 void ConnectionManager::broadcast(const std::string& message) {
+    Timer broadcast_t("ws_broadcast");          // ⑤ timed: whole broadcast loop
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto* ws : clients_) {
+        Timer transmit_t("ws_transmit");        // ③ timed: single send() per client
         ws->send(message);
     }
     std::cout << "[connmgr] broadcast to " << clients_.size() << " client(s)\n";

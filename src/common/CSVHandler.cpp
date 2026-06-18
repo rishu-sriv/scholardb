@@ -1,10 +1,12 @@
 #include "CSVHandler.h"
+#include "Timer.h"
 
 #include <fstream>
 #include <sstream>
 #include <iostream>
 
 std::vector<Student> CSVHandler::loadFromFile(const std::string& path) {
+    Timer t("csv_load");                // ① timed: CSV load at startup
     std::vector<Student> students;
     std::ifstream file(path);
 
@@ -56,6 +58,7 @@ std::vector<Student> CSVHandler::loadFromFile(const std::string& path) {
 }
 
 void CSVHandler::saveToFile(const std::string& path, const std::vector<Student>& students) {
+    Timer t("csv_save");                // ④ timed: CSV save after each mutation
     std::ofstream file(path);
 
     if (!file.is_open()) {
