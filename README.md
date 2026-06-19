@@ -204,3 +204,11 @@ Measured on Apple M-series, loopback, 500-student dataset, 2 connected clients. 
 | Broadcast | 996 | Full loop over all connected clients |
 
 `csv_load` runs once. All per-request operations complete in under 1 ms at this scale.
+
+---
+
+## Design Trade-offs
+
+- **Simple CSV format** — the parser uses a lightweight delimiter split, keeping I/O fast and the code easy to follow. Field values with commas are outside the current schema, which keeps the parser minimal and dependency-free.
+- **Full dataset broadcast** — every connected client receives the complete student array on each update, ensuring all views are always perfectly in sync without any client-side reconciliation logic.
+- **Single-file persistence** — the entire dataset is written atomically on each mutation, so the file on disk always reflects a consistent state and is never partially written.
